@@ -53,6 +53,7 @@ aside h2 { padding: 0 10px 12px; }
 .field { margin-top: 10px; }
 .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.reference-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
 .pill { padding: 4px 9px; border-radius: 999px; background: var(--panel-2); color: var(--muted); font-size: 12px; }
 .pill.running { color: var(--accent-2); }
 .pill.ok { color: var(--ok); }

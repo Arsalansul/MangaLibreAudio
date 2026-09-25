@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -20,6 +22,7 @@ import audiomanga
 
 ROOT = Path(__file__).resolve().parent
 WEB_ROOT = ROOT / "web"
+VOICE_LIBRARY = ROOT / ".runtime" / "voices"
 DEFAULT_CHAPTER = Path(r"E:\MangaTranslateProjects\Bleach\out\chapter")
 VOICES = ["aidar", "baya", "kseniya", "xenia"]
 RATES = ["x-slow", "slow", "medium", "fast", "x-fast"]
@@ -109,6 +112,7 @@ class AppState:
                 "chapter": str(self.chapter) if self.chapter else "",
                 "project": self.project,
                 "voices": VOICES,
+                "engines": ["silero", "f5"],
                 "rates": RATES,
                 "pitches": PITCHES,
                 "building": self.building,
@@ -173,6 +177,21 @@ class Handler(BaseHTTPRequestHandler):
                 if selected:
                     self.state.open_chapter(selected)
                 self.send_json(self.state.payload())
+            elif self.path == "/api/browse-audio":
+                selected = choose_audio_file()
+                if not selected:
+                    self.send_json({"audio": ""})
+                else:
+                    VOICE_LIBRARY.mkdir(parents=True, exist_ok=True)
+                    safe_stem = re.sub(r"[^0-9A-Za-zА-Яа-я_-]+", "-", selected.stem).strip("-") or "voice"
+                    target = VOICE_LIBRARY / f"{safe_stem}{selected.suffix.lower()}"
+                    counter = 2
+                    while target.exists() and target.read_bytes() != selected.read_bytes():
+                        target = VOICE_LIBRARY / f"{safe_stem}-{counter}{selected.suffix.lower()}"
+                        counter += 1
+                    if not target.exists():
+                        shutil.copy2(selected, target)
+                    self.send_json({"audio": str(target.resolve())})
             elif self.path == "/api/save":
                 data = self.read_json()
                 self.state.save(data.get("project") or {})
@@ -238,6 +257,24 @@ def choose_directory(initial: Path | None) -> Path | None:
         return Path(value) if value else None
     except Exception as exc:
         raise audiomanga.BuildError(f"Не удалось открыть выбор папки: {exc}") from exc
+
+
+def choose_audio_file() -> Path | None:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        value = filedialog.askopenfilename(
+            title="Выберите референс голоса для F5-TTS",
+            filetypes=[("Audio", "*.wav *.mp3 *.flac *.m4a *.ogg"), ("All files", "*.*")],
+        )
+        root.destroy()
+        return Path(value) if value else None
+    except Exception as exc:
+        raise audiomanga.BuildError(f"Не удалось выбрать аудио: {exc}") from exc
 
 
 def main() -> int:

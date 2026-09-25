@@ -75,6 +75,8 @@ function render() {
 
 function renderRegion(region, index) {
   region.prosody ||= { rate: "medium", pitch: "medium", pause_before_ms: 0, pause_after_ms: 0 };
+  region.f5 ||= { reference_audio: "", reference_text: "", speed: 1.0, nfe_step: 32 };
+  region.engine ||= "silero";
   const card = document.createElement("article"); card.className = "region";
   const head = document.createElement("div"); head.className = "region-head";
   const id = document.createElement("span"); id.className = "region-id"; id.textContent = `${index + 1}. ${region.id}`;
@@ -90,18 +92,46 @@ function renderRegion(region, index) {
   spoken.oninput = () => { region.tts_text = spoken.value; state.dirty = true; };
   card.append(field("Текст для произношения · + перед ударной гласной", spoken));
 
-  const voices = document.createElement("div"); voices.className = "grid";
-  voices.append(
-    field("Голос", select(state.data.voices, region.voice || "aidar", (v) => region.voice = v)),
+  const identity = document.createElement("div"); identity.className = "grid";
+  identity.append(
+    field("Движок", select(state.data.engines, region.engine, (v) => { region.engine = v; render(); })),
     field("Персонаж", input(region.speaker || "", (v) => region.speaker = v)),
-  ); card.append(voices);
-  const prosody = document.createElement("div"); prosody.className = "grid four";
-  prosody.append(
-    field("Темп", select(state.data.rates, region.prosody.rate || "medium", (v) => region.prosody.rate = v)),
-    field("Высота", select(state.data.pitches, region.prosody.pitch || "medium", (v) => region.prosody.pitch = v)),
+  ); card.append(identity);
+
+  if (region.engine === "f5") {
+    const referenceRow = document.createElement("div"); referenceRow.className = "reference-row";
+    const referenceInput = input(region.f5.reference_audio || "", (v) => region.f5.reference_audio = v);
+    const choose = document.createElement("button"); choose.type = "button"; choose.className = "secondary"; choose.textContent = "Выбрать аудио…";
+    choose.onclick = async () => {
+      try {
+        const result = await api("/api/browse-audio", { method: "POST", body: "{}" });
+        if (result.audio) { region.f5.reference_audio = result.audio; state.dirty = true; render(); }
+      } catch (error) { message(error.message, true); }
+    };
+    referenceRow.append(referenceInput, choose);
+    card.append(field("Референс голоса", referenceRow));
+    const referenceText = document.createElement("textarea"); referenceText.value = region.f5.reference_text || "";
+    referenceText.placeholder = "Можно оставить пустым для авторасшифровки";
+    referenceText.oninput = () => { region.f5.reference_text = referenceText.value; state.dirty = true; };
+    card.append(field("Текст референса · необязательно", referenceText));
+    const f5Settings = document.createElement("div"); f5Settings.className = "grid";
+    const speed = input(region.f5.speed ?? 1.0, (v) => region.f5.speed = v, "number"); speed.min = "0.3"; speed.max = "2"; speed.step = "0.05";
+    const nfe = input(region.f5.nfe_step ?? 32, (v) => region.f5.nfe_step = v, "number"); nfe.min = "4"; nfe.max = "64"; nfe.step = "2";
+    f5Settings.append(field("Скорость F5 · 0.3–2.0", speed), field("Качество NFE · 4–64", nfe));
+    card.append(f5Settings);
+  } else {
+    card.append(field("Голос Silero", select(state.data.voices, region.voice || "aidar", (v) => region.voice = v)));
+    const sileroProsody = document.createElement("div"); sileroProsody.className = "grid";
+    sileroProsody.append(
+      field("Темп", select(state.data.rates, region.prosody.rate || "medium", (v) => region.prosody.rate = v)),
+      field("Высота", select(state.data.pitches, region.prosody.pitch || "medium", (v) => region.prosody.pitch = v)),
+    ); card.append(sileroProsody);
+  }
+  const pauses = document.createElement("div"); pauses.className = "grid";
+  pauses.append(
     field("Пауза до, мс", input(region.prosody.pause_before_ms || 0, (v) => region.prosody.pause_before_ms = v, "number")),
     field("Пауза после, мс", input(region.prosody.pause_after_ms || 0, (v) => region.prosody.pause_after_ms = v, "number")),
-  ); card.append(prosody);
+  ); card.append(pauses);
   return card;
 }
 

@@ -1,5 +1,9 @@
 __pycache__/
 .venv/
+.f5-venv/
 *.pyc
 .runtime/models/*.pt
+.runtime/huggingface/
+.runtime/voices/
+.runtime/f5-test/
 .audiomanga/

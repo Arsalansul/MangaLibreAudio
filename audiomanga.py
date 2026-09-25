@@ -24,6 +24,7 @@ PROJECT_FILE = "audiomanga.project.json"
 BUILD_DIR = ".audiomanga"
 DEFAULT_SILERO_MODEL = Path(__file__).resolve().parent / ".runtime" / "models" / "v5_4_ru.pt"
 LOCAL_PYTHON = Path(__file__).resolve().parent / ".venv" / "Scripts" / "python.exe"
+DEFAULT_F5_CLI = Path(__file__).resolve().parent / ".f5-venv" / "Scripts" / "f5-tts_infer-cli.exe"
 DEFAULT_FFMPEG_CANDIDATES = (
     Path(r"E:\ffmpeg\bin\ffmpeg.exe"),
     Path(r"E:\ffmpeg\ffmpeg.exe"),
@@ -135,9 +136,16 @@ def discover_pages(chapter: Path) -> tuple[list[dict[str, Any]], list[str]]:
                     "text": text,
                     "tts_text": text,
                     "speak": True,
+                    "engine": "silero",
                     "speaker": "narrator",
                     "voice": "aidar",
                     "prosody": default_prosody(text),
+                    "f5": {
+                        "reference_audio": "",
+                        "reference_text": "",
+                        "speed": 1.0,
+                        "nfe_step": 32,
+                    },
                     "kind": str(region.get("kind") or "text"),
                     "bbox": region.get("bbox") or [],
                 }
@@ -204,6 +212,12 @@ def find_ffmpeg(explicit: str | None) -> Path:
     if local_app_data:
         winget_packages = Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
         if winget_packages.is_dir():
+            candidates.extend(
+                sorted(
+                    winget_packages.glob("Gyan.FFmpeg.Shared_*/*/bin/ffmpeg.exe"),
+                    reverse=True,
+                )
+            )
             candidates.extend(
                 sorted(
                     winget_packages.glob("Gyan.FFmpeg_*/*/bin/ffmpeg.exe"),
@@ -317,6 +331,115 @@ def synthesize(
         temporary.unlink(missing_ok=True)
 
 
+def resolve_reference_audio(chapter: Path, value: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = chapter / path
+    return path.resolve()
+
+
+def clean_f5_text(text: str) -> str:
+    """Remove Silero-only stress markers before sending text to F5-TTS."""
+    return text.replace("+", "")
+
+
+def synthesize_f5(
+    text: str,
+    output: Path,
+    reference_audio: Path,
+    reference_text: str,
+    speed: float,
+    nfe_step: int,
+    f5_cli: Path,
+    ffmpeg: Path,
+    prosody: dict[str, Any] | None = None,
+) -> None:
+    if not f5_cli.is_file():
+        raise BuildError(f"F5-TTS не установлен: {f5_cli}. Запустите install-f5.bat.")
+    if not reference_audio.is_file():
+        raise BuildError(f"Не найден референс голоса F5-TTS: {reference_audio}")
+    if not 0.3 <= speed <= 2.0:
+        raise BuildError(f"Скорость F5-TTS должна быть от 0.3 до 2.0, получено: {speed}")
+    if not 4 <= nfe_step <= 64:
+        raise BuildError(f"NFE steps F5-TTS должны быть от 4 до 64, получено: {nfe_step}")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    raw_output = output.with_suffix(".f5.wav")
+    converted = output.with_suffix(".tmp.wav")
+    raw_output.unlink(missing_ok=True)
+    converted.unlink(missing_ok=True)
+    command = [
+        str(f5_cli),
+        "--model", "F5TTS_Base",
+        "--ckpt_file", "hf://hotstone228/F5-TTS-Russian/model_last.safetensors",
+        "--vocab_file", "hf://hotstone228/F5-TTS-Russian/vocab.txt",
+        "--ref_audio", str(reference_audio),
+        "--ref_text", reference_text,
+        "--gen_text", text,
+        "--output_dir", str(output.parent),
+        "--output_file", raw_output.name,
+        "--speed", str(speed),
+        "--nfe_step", str(nfe_step),
+        "--device", "cpu",
+        "--remove_silence",
+    ]
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "1"
+    environment["PATH"] = str(ffmpeg.parent) + os.pathsep + environment.get("PATH", "")
+    environment.setdefault(
+        "HF_HOME", str(Path(__file__).resolve().parent / ".runtime" / "huggingface")
+    )
+    if not reference_text.strip():
+        log(
+            "F5-TTS: текст референса пуст — запускаю автоматическую расшифровку. "
+            "При первом запуске будет загружена модель Whisper."
+        )
+    try:
+        result = subprocess.run(command, env=environment)
+        if result.returncode or not raw_output.is_file():
+            raise BuildError(f"F5-TTS завершился с кодом {result.returncode}")
+        conversion = subprocess.run(
+            [
+                str(ffmpeg), "-y", "-hide_banner", "-loglevel", "error",
+                "-i", str(raw_output), "-ac", "1", "-ar", "48000",
+                "-c:a", "pcm_s16le", str(converted),
+            ]
+        )
+        if conversion.returncode or not converted.is_file():
+            raise BuildError("FFmpeg не смог привести звук F5-TTS к PCM16 48 kHz")
+        converted.replace(output)
+        add_wav_padding(
+            output,
+            max(0, int((prosody or {}).get("pause_before_ms", 0))),
+            max(0, int((prosody or {}).get("pause_after_ms", 0))),
+        )
+    finally:
+        raw_output.unlink(missing_ok=True)
+        converted.unlink(missing_ok=True)
+
+
+def add_wav_padding(path: Path, before_ms: int, after_ms: int) -> None:
+    if before_ms <= 0 and after_ms <= 0:
+        return
+    channels, width, rate, _frames = wav_info(path)
+    if (channels, width) != (1, 2):
+        raise BuildError(f"Для добавления пауз ожидается mono PCM16 WAV: {path}")
+    with wave.open(str(path), "rb") as source:
+        frames = source.readframes(source.getnframes())
+    temporary = path.with_suffix(".padding.wav")
+    try:
+        with wave.open(str(temporary), "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(rate)
+            append_silence(output, before_ms, rate)
+            output.writeframes(frames)
+            append_silence(output, after_ms, rate)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def wav_info(path: Path) -> tuple[int, int, int, int]:
     with wave.open(str(path), "rb") as audio:
         return (
@@ -421,6 +544,8 @@ def build(args: argparse.Namespace) -> Path:
         settings["default_voice"] = args.voice
     default_voice = str(settings.get("default_voice", "aidar"))
     model_path = Path(args.model).expanduser().resolve()
+    f5_cli = Path(args.f5_cli).expanduser().resolve()
+    ffmpeg = find_ffmpeg(args.ffmpeg)
 
     warnings = project.get("warnings") or []
     for warning in warnings:
@@ -444,15 +569,48 @@ def build(args: argparse.Namespace) -> Path:
             if not text:
                 continue
             voice = str(region.get("voice") or default_voice)
+            engine = str(region.get("engine") or "silero")
             prosody = region.get("prosody") or {}
-            ssml = make_ssml(text, prosody)
-            digest = hashlib.sha1(
-                f"silero-v5.4\0{voice}\0{ssml}".encode("utf-8")
-            ).hexdigest()[:12]
+            synthesis_text = text
+            if engine == "f5":
+                f5 = region.get("f5") or {}
+                synthesis_text = clean_f5_text(text)
+                reference_audio = resolve_reference_audio(
+                    chapter, str(f5.get("reference_audio") or "")
+                )
+                reference_text = clean_translation(f5.get("reference_text"))
+                speed = float(f5.get("speed", 1.0))
+                nfe_step = int(f5.get("nfe_step", 32))
+                reference_signature = "missing"
+                if reference_audio.is_file():
+                    stat = reference_audio.stat()
+                    reference_signature = (
+                        f"{reference_audio}:{stat.st_size}:{stat.st_mtime_ns}"
+                    )
+                cache_value = (
+                    f"f5-russian-hotstone228\0{synthesis_text}\0{reference_signature}\0{reference_text}\0"
+                    f"{speed}\0{nfe_step}\0"
+                    f"{int(prosody.get('pause_before_ms', 0))}\0"
+                    f"{int(prosody.get('pause_after_ms', 0))}"
+                )
+            elif engine == "silero":
+                cache_value = f"silero-v5.4\0{voice}\0{make_ssml(text, prosody)}"
+            else:
+                raise BuildError(f"Неизвестный движок TTS: {engine}")
+            digest = hashlib.sha1(cache_value.encode("utf-8")).hexdigest()[:12]
             clip = audio_dir / f"{page['id']}_{region['id']}_{digest}.wav"
             if not clip.exists():
-                log(f"Озвучка {page['id']}/{region['id']} ({voice}): {text}")
-                synthesize(text, voice, clip, model_path, prosody)
+                log(
+                    f"Озвучка {page['id']}/{region['id']} "
+                    f"({engine}/{voice}): {synthesis_text}"
+                )
+                if engine == "f5":
+                    synthesize_f5(
+                        synthesis_text, clip, reference_audio, reference_text, speed,
+                        nfe_step, f5_cli, ffmpeg, prosody,
+                    )
+                else:
+                    synthesize(synthesis_text, voice, clip, model_path, prosody)
             clips.append(clip)
             total_regions += 1
         page_clips.append(clips)
@@ -461,7 +619,6 @@ def build(args: argparse.Namespace) -> Path:
 
     combined_audio = build_dir / "chapter.wav"
     durations = combine_audio(page_clips, combined_audio, settings)
-    ffmpeg = find_ffmpeg(args.ffmpeg)
     output = Path(args.output).expanduser().resolve() if args.output else chapter / "chapter.mp4"
     render_video(ffmpeg, chapter, pages, durations, combined_audio, output, settings, build_dir)
     log(f"Готово: {output}")
@@ -482,6 +639,11 @@ def make_parser() -> argparse.ArgumentParser:
         "--model",
         default=str(DEFAULT_SILERO_MODEL),
         help="путь к собственной модели Silero v5.4",
+    )
+    command.add_argument(
+        "--f5-cli",
+        default=str(DEFAULT_F5_CLI),
+        help="путь к f5-tts_infer-cli.exe",
     )
     command.add_argument("--output", help="выходной MP4; по умолчанию chapter.mp4")
     command.add_argument(

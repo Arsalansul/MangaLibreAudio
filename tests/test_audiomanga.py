@@ -70,6 +70,9 @@ class AudioMangaTests(unittest.TestCase):
         self.assertEqual(prosody["pitch"], "low")
         self.assertGreater(prosody["pause_after_ms"], 0)
 
+    def test_clean_f5_text_removes_silero_stress_markers(self):
+        self.assertEqual(audiomanga.clean_f5_text("Ч+УВСТВУЮ ёлку+"), "ЧУВСТВУЮ ёлку")
+
     def test_combine_audio_adds_page_timing(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
             root = Path(temporary)
@@ -92,6 +95,17 @@ class AudioMangaTests(unittest.TestCase):
             )
             self.assertAlmostEqual(durations[0], 1.3, places=3)
             self.assertEqual(audiomanga.wav_info(combined)[3], 1300)
+
+    def test_add_wav_padding(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
+            output = Path(temporary) / "clip.wav"
+            with wave.open(str(output), "wb") as audio:
+                audio.setnchannels(1)
+                audio.setsampwidth(2)
+                audio.setframerate(1000)
+                audio.writeframes(b"\x01\x00" * 1000)
+            audiomanga.add_wav_padding(output, 100, 250)
+            self.assertEqual(audiomanga.wav_info(output)[3], 1350)
 
 
 if __name__ == "__main__":
