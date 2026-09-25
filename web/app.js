@@ -61,11 +61,12 @@ function nextRegionId() {
   return id;
 }
 
-function addRegion(page) {
+function addRegion(page, afterIndex = null) {
   page.regions ||= [];
-  const previous = page.regions.at(-1);
+  const insertIndex = afterIndex === null ? page.regions.length : afterIndex + 1;
+  const previous = insertIndex > 0 ? page.regions[insertIndex - 1] : null;
   const engine = previous?.engine || "silero";
-  page.regions.push({
+  const region = {
     id: nextRegionId(),
     text: "",
     tts_text: "",
@@ -80,10 +81,11 @@ function addRegion(page) {
       speed: previous?.f5?.speed ?? 1.0,
       nfe_step: previous?.f5?.nfe_step ?? 32,
     },
-  });
+  };
+  page.regions.splice(insertIndex, 0, region);
   state.dirty = true;
   render();
-  document.querySelector("#regions .region:last-child textarea")?.focus();
+  document.querySelectorAll("#regions .region")[insertIndex]?.querySelector("textarea")?.focus();
 }
 
 function removeRegion(page, index) {
@@ -92,6 +94,16 @@ function removeRegion(page, index) {
   page.regions.splice(index, 1);
   state.dirty = true;
   render();
+}
+
+function moveRegion(page, index, offset) {
+  const target = index + offset;
+  if (target < 0 || target >= page.regions.length) return;
+  const [region] = page.regions.splice(index, 1);
+  page.regions.splice(target, 0, region);
+  state.dirty = true;
+  render();
+  document.querySelectorAll("#regions .region")[target]?.scrollIntoView({ block: "nearest" });
 }
 
 function renderPageActions(page) {
@@ -159,10 +171,17 @@ function renderRegion(region, index) {
   const checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.checked = region.speak !== false;
   checkbox.onchange = () => { region.speak = checkbox.checked; state.dirty = true; };
   toggle.append(checkbox, document.createTextNode("Озвучивать"));
+  const up = document.createElement("button"); up.type = "button"; up.className = "secondary compact icon"; up.textContent = "↑"; up.title = "Поднять реплику"; up.disabled = index === 0;
+  const down = document.createElement("button"); down.type = "button"; down.className = "secondary compact icon"; down.textContent = "↓"; down.title = "Опустить реплику";
+  const addAfter = document.createElement("button"); addAfter.type = "button"; addAfter.className = "secondary compact"; addAfter.textContent = "+ После";
   const remove = document.createElement("button"); remove.type = "button"; remove.className = "danger compact"; remove.textContent = "Удалить";
   const page = state.data.project.pages[state.pageIndex];
+  down.disabled = index === page.regions.length - 1;
+  up.onclick = () => moveRegion(page, index, -1);
+  down.onclick = () => moveRegion(page, index, 1);
+  addAfter.onclick = () => addRegion(page, index);
   remove.onclick = () => removeRegion(page, index);
-  controls.append(toggle, remove); head.append(id, controls); card.append(head);
+  controls.append(toggle, up, down, addAfter, remove); head.append(id, controls); card.append(head);
 
   const visible = document.createElement("textarea"); visible.value = region.text || "";
   visible.oninput = () => { region.text = visible.value; state.dirty = true; };
