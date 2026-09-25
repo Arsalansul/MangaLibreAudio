@@ -26,6 +26,16 @@ def test_command_uses_russian_model() -> None:
     assert command[command.index("--device") + 1] == "cpu"
 
 
+def test_command_accepts_resolved_local_model_files() -> None:
+    with patch("worker.app._cli", return_value="f5-cli"):
+        command = build_command(
+            Path("ref.wav"), Path("out"), "Привет", "Текст", 1.0, 16, "cuda",
+            Path("/models/model.safetensors"), Path("/models/vocab.txt"),
+        )
+    assert command[command.index("--ckpt_file") + 1] == "/models/model.safetensors"
+    assert command[command.index("--vocab_file") + 1] == "/models/vocab.txt"
+
+
 def test_empty_text_is_rejected() -> None:
     client = TestClient(app)
     response = client.post(
@@ -34,4 +44,3 @@ def test_empty_text_is_rejected() -> None:
         files={"reference_audio": ("ref.wav", b"audio", "audio/wav")},
     )
     assert response.status_code == 422
-

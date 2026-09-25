@@ -6,6 +6,7 @@ services:
       dockerfile: Dockerfile.f5-worker.cpu
     environment:
       F5_DEVICE: cpu
+      HF_TOKEN: ${HF_TOKEN:-}
     ports:
       - "8770:8770"
     volumes:
@@ -19,6 +20,7 @@ services:
       dockerfile: Dockerfile.f5-worker.nvidia
     environment:
       F5_DEVICE: auto
+      HF_TOKEN: ${HF_TOKEN:-}
     ports:
       - "8770:8770"
     volumes:
@@ -28,4 +30,3 @@ services:
 
 volumes:
   f5-models:
-

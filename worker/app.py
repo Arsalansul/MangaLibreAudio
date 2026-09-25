@@ -4,18 +4,23 @@ import os
 import shutil
 import subprocess
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
 import torch
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from huggingface_hub import hf_hub_download
 from starlette.background import BackgroundTask
 
 
 MODEL = "F5TTS_Base"
-CHECKPOINT = "hf://hotstone228/F5-TTS-Russian/model_last.safetensors"
-VOCAB = "hf://hotstone228/F5-TTS-Russian/vocab.txt"
+MODEL_REPO = "hotstone228/F5-TTS-Russian"
+CHECKPOINT_NAME = "model_last.safetensors"
+VOCAB_NAME = "vocab.txt"
+CHECKPOINT = f"hf://{MODEL_REPO}/{CHECKPOINT_NAME}"
+VOCAB = f"hf://{MODEL_REPO}/{VOCAB_NAME}"
 MAX_REFERENCE_BYTES = int(os.getenv("F5_MAX_REFERENCE_MB", "50")) * 1024 * 1024
 ALLOWED_DEVICES = {"auto", "cpu", "cuda"}
 
@@ -39,6 +44,14 @@ def _cli() -> str:
     return resolved
 
 
+@lru_cache(maxsize=1)
+def model_files() -> tuple[Path, Path]:
+    """Download the public model once and return ordinary local paths for F5 1.1.7."""
+    checkpoint = Path(hf_hub_download(repo_id=MODEL_REPO, filename=CHECKPOINT_NAME))
+    vocab = Path(hf_hub_download(repo_id=MODEL_REPO, filename=VOCAB_NAME))
+    return checkpoint, vocab
+
+
 def build_command(
     reference: Path,
     output_dir: Path,
@@ -47,12 +60,14 @@ def build_command(
     speed: float,
     nfe_step: int,
     device: str,
+    checkpoint: Path | str = CHECKPOINT,
+    vocab: Path | str = VOCAB,
 ) -> list[str]:
     return [
         _cli(),
         "--model", MODEL,
-        "--ckpt_file", CHECKPOINT,
-        "--vocab_file", VOCAB,
+        "--ckpt_file", str(checkpoint),
+        "--vocab_file", str(vocab),
         "--ref_audio", str(reference),
         "--ref_text", reference_text,
         "--gen_text", text,
@@ -124,8 +139,13 @@ async def synthesize(
         if size == 0:
             raise HTTPException(422, "Референсное аудио пустое")
 
+        try:
+            checkpoint, vocab = model_files()
+        except Exception as exc:
+            raise HTTPException(503, f"Не удалось загрузить модель с Hugging Face: {exc}") from exc
         command = build_command(
-            reference, temp_dir, text, reference_text.strip(), speed, nfe_step, device
+            reference, temp_dir, text, reference_text.strip(), speed, nfe_step,
+            device, checkpoint, vocab,
         )
         environment = os.environ.copy()
         environment.setdefault("PYTHONUTF8", "1")
