@@ -18,8 +18,13 @@ if errorlevel 1 goto :error
 
 ".f5-venv\Scripts\python.exe" -m pip install --upgrade pip
 if errorlevel 1 goto :error
-".f5-venv\Scripts\python.exe" -m pip install --force-reinstall --index-url https://download.pytorch.org/whl/cpu torch==2.6.0 torchaudio==2.6.0
-if errorlevel 1 goto :error
+".f5-venv\Scripts\python.exe" -c "import torch,sys; raise SystemExit(0 if torch.__version__.startswith('2.6.0+cpu') else 1)" >nul 2>&1
+if errorlevel 1 (
+  ".f5-venv\Scripts\python.exe" -m pip install --force-reinstall --index-url https://download.pytorch.org/whl/cpu torch==2.6.0 torchaudio==2.6.0
+  if errorlevel 1 goto :error
+) else (
+  echo Compatible CPU PyTorch is already installed.
+)
 ".f5-venv\Scripts\python.exe" -m pip install -r requirements-f5.txt
 if errorlevel 1 goto :error
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0prepare-f5-ffmpeg.ps1"
