@@ -22,7 +22,7 @@ if errorlevel 1 goto :error
 if errorlevel 1 goto :error
 ".f5-venv\Scripts\python.exe" -m pip install -r requirements-f5.txt
 if errorlevel 1 goto :error
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$root=Get-ChildItem -LiteralPath ($env:LOCALAPPDATA+'\Microsoft\WinGet\Packages') -Directory ^| Where-Object Name -like 'Gyan.FFmpeg.Shared_*' ^| Select-Object -First 1; if(-not $root){throw 'Install Gyan.FFmpeg.Shared first'}; $bin=Get-ChildItem -LiteralPath $root.FullName -Recurse -File -Filter ffmpeg.exe ^| Select-Object -First 1; Copy-Item -Path ($bin.Directory.FullName+'\*.dll') -Destination '.f5-venv\Lib\site-packages\torchcodec' -Force"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0prepare-f5-ffmpeg.ps1"
 if errorlevel 1 goto :error
 
 echo.
