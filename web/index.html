@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AudioManga</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header>
+    <div>
+      <p class="eyebrow">Локальная студия озвучки</p>
+      <h1>AudioManga</h1>
+    </div>
+    <div class="header-actions">
+      <button id="save" class="secondary">Сохранить</button>
+      <button id="build">Собрать видео</button>
+    </div>
+  </header>
+
+  <section class="chapter-bar">
+    <label for="chapter">Папка главы</label>
+    <div class="path-row">
+      <input id="chapter" spellcheck="false" placeholder="E:\MangaTranslateProjects\...">
+      <button id="browse" class="secondary">Выбрать…</button>
+      <button id="open" class="secondary">Открыть</button>
+    </div>
+    <p id="message" class="message"></p>
+  </section>
+
+  <main id="workspace" class="workspace empty">
+    <aside>
+      <h2>Страницы</h2>
+      <nav id="pages"></nav>
+    </aside>
+    <section class="editor">
+      <div id="empty-state" class="empty-state">Выберите папку с главой</div>
+      <div id="page-editor" hidden>
+        <div class="page-heading">
+          <div><span class="muted">Страница</span><h2 id="page-title"></h2></div>
+          <span id="region-count" class="pill"></span>
+        </div>
+        <div class="page-content">
+          <div class="preview"><img id="preview" alt="Страница манги"></div>
+          <div id="regions" class="regions"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <section class="build-panel">
+    <div class="build-heading"><h2>Сборка</h2><span id="build-status" class="pill">Ожидание</span></div>
+    <pre id="build-log">Здесь появится журнал сборки.</pre>
+  </section>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,512 @@
+#!/usr/bin/env python3
+"""Build a narrated manga chapter from translated page analysis files."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import warnings
+import wave
+from array import array
+from html import escape as xml_escape
+from pathlib import Path
+from typing import Any
+
+
+PROJECT_FILE = "audiomanga.project.json"
+BUILD_DIR = ".audiomanga"
+DEFAULT_SILERO_MODEL = Path(__file__).resolve().parent / ".runtime" / "models" / "v5_4_ru.pt"
+LOCAL_PYTHON = Path(__file__).resolve().parent / ".venv" / "Scripts" / "python.exe"
+DEFAULT_FFMPEG_CANDIDATES = (
+    Path(r"E:\ffmpeg\bin\ffmpeg.exe"),
+    Path(r"E:\ffmpeg\ffmpeg.exe"),
+)
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
+
+
+class BuildError(RuntimeError):
+    pass
+
+
+def use_local_runtime() -> None:
+    """Re-exec through AudioManga's venv when the launcher Python lacks Torch."""
+    if importlib.util.find_spec("torch") is not None:
+        return
+    if not LOCAL_PYTHON.is_file():
+        return
+    current = Path(sys.executable).resolve()
+    if current == LOCAL_PYTHON.resolve():
+        return
+    completed = subprocess.run([str(LOCAL_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
+    raise SystemExit(completed.returncode)
+
+
+def log(message: str) -> None:
+    print(message, flush=True)
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BuildError(f"Не удалось прочитать JSON {path}: {exc}") from exc
+
+
+def write_json(path: Path, value: Any) -> None:
+    path.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def find_page_image(chapter: Path, stem: str) -> Path | None:
+    for extension in IMAGE_EXTENSIONS:
+        candidate = chapter / f"{stem}{extension}"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def region_sort_key(region: dict[str, Any]) -> tuple[int, int, int]:
+    """Approximate Japanese manga order: rows top-down, items right-to-left."""
+    bbox = region.get("bbox") or [0, 0, 0, 0]
+    x, y, _width, _height = (list(bbox) + [0, 0, 0, 0])[:4]
+    # A fixed band keeps nearby bubbles on the same reading row. Using each
+    # bubble's own height here would make large bubbles jump ahead of small ones.
+    return (int(y) // 120, -int(x), int(y))
+
+
+def clean_translation(value: Any) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\s*\|\s*", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def default_prosody(text: str) -> dict[str, Any]:
+    """Create a conservative first-pass delivery hint from punctuation."""
+    if "..." in text or "…" in text:
+        return {
+            "rate": "slow",
+            "pitch": "low",
+            "pause_before_ms": 0,
+            "pause_after_ms": 350,
+        }
+    if "!" in text:
+        return {
+            "rate": "fast",
+            "pitch": "high",
+            "pause_before_ms": 0,
+            "pause_after_ms": 180,
+        }
+    return {
+        "rate": "medium",
+        "pitch": "medium",
+        "pause_before_ms": 0,
+        "pause_after_ms": 0,
+    }
+
+
+def discover_pages(chapter: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    pages: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for analysis_path in sorted(chapter.glob("*.analysis.json")):
+        stem = analysis_path.name.removesuffix(".analysis.json")
+        image = find_page_image(chapter, stem)
+        if image is None:
+            warnings.append(f"{stem}: пропущена — рядом нет готового изображения")
+            continue
+        analysis = read_json(analysis_path)
+        regions = []
+        raw_regions = sorted(analysis.get("regions") or [], key=region_sort_key)
+        for region in raw_regions:
+            text = clean_translation(region.get("translation"))
+            if not text:
+                continue
+            regions.append(
+                {
+                    "id": str(region.get("id") or f"r{len(regions) + 1:03d}"),
+                    "text": text,
+                    "tts_text": text,
+                    "speak": True,
+                    "speaker": "narrator",
+                    "voice": "aidar",
+                    "prosody": default_prosody(text),
+                    "kind": str(region.get("kind") or "text"),
+                    "bbox": region.get("bbox") or [],
+                }
+            )
+        pages.append(
+            {
+                "id": stem,
+                "image": image.name,
+                "analysis": analysis_path.name,
+                "regions": regions,
+            }
+        )
+    return pages, warnings
+
+
+def new_project(chapter: Path) -> dict[str, Any]:
+    pages, warnings = discover_pages(chapter)
+    if not pages:
+        raise BuildError(
+            "Не найдено ни одной пары <страница> + <страница>.analysis.json"
+        )
+    return {
+        "version": 1,
+        "chapter": str(chapter.resolve()),
+        "settings": {
+            "default_voice": "aidar",
+            "sample_rate": 48000,
+            "pause_between_replicas_ms": 450,
+            "page_lead_ms": 500,
+            "page_tail_ms": 800,
+            "resolution": "1920x1080",
+            "fps": 30,
+            "background": "black",
+        },
+        "pages": pages,
+        "warnings": warnings,
+    }
+
+
+def load_or_create_project(chapter: Path, refresh: bool) -> tuple[dict[str, Any], Path]:
+    project_path = chapter / PROJECT_FILE
+    if project_path.exists() and not refresh:
+        project = read_json(project_path)
+        log(f"Сценарий: {project_path} (существующий)")
+        return project, project_path
+    project = new_project(chapter)
+    write_json(project_path, project)
+    log(f"Сценарий создан: {project_path}")
+    return project, project_path
+
+
+def find_ffmpeg(explicit: str | None) -> Path:
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(Path(explicit))
+    env_path = os.environ.get("AUDIOMANGA_FFMPEG")
+    if env_path:
+        candidates.append(Path(env_path))
+    on_path = shutil.which("ffmpeg")
+    if on_path:
+        candidates.append(Path(on_path))
+    candidates.extend(DEFAULT_FFMPEG_CANDIDATES)
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        winget_packages = Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
+        if winget_packages.is_dir():
+            candidates.extend(
+                sorted(
+                    winget_packages.glob("Gyan.FFmpeg_*/*/bin/ffmpeg.exe"),
+                    reverse=True,
+                )
+            )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    raise BuildError(
+        "ffmpeg.exe не найден. В E:\\ffmpeg находится исходный код, а не Windows-"
+        "сборка. Положите готовый файл в E:\\ffmpeg\\bin\\ffmpeg.exe либо передайте "
+        "--ffmpeg <путь>."
+    )
+
+
+def write_pcm16_wav(path: Path, samples: Any, sample_rate: int) -> None:
+    values = samples.tolist() if hasattr(samples, "tolist") else list(samples)
+    pcm = array(
+        "h",
+        (
+            max(-32768, min(32767, int(float(value) * 32767.0)))
+            for value in values
+        ),
+    )
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(sample_rate)
+        output.writeframes(pcm.tobytes())
+
+
+_silero_model: Any = None
+VALID_RATES = {"x-slow", "slow", "medium", "fast", "x-fast"}
+VALID_PITCHES = {"x-low", "low", "medium", "high", "x-high"}
+
+
+def make_ssml(text: str, prosody: dict[str, Any] | None = None) -> str:
+    prosody = prosody or {}
+    rate = str(prosody.get("rate", "medium"))
+    pitch = str(prosody.get("pitch", "medium"))
+    if rate not in VALID_RATES:
+        raise BuildError(f"Некорректный темп Silero: {rate}")
+    if pitch not in VALID_PITCHES:
+        raise BuildError(f"Некорректная высота голоса Silero: {pitch}")
+    before = max(0, int(prosody.get("pause_before_ms", 0)))
+    after = max(0, int(prosody.get("pause_after_ms", 0)))
+    parts = ["<speak>"]
+    if before:
+        parts.append(f'<break time="{before}ms"/>')
+    parts.append(
+        f'<prosody rate="{rate}" pitch="{pitch}">{xml_escape(text)}</prosody>'
+    )
+    if after:
+        parts.append(f'<break time="{after}ms"/>')
+    parts.append("</speak>")
+    return "".join(parts)
+
+
+def synthesize_silero(
+    text: str,
+    voice: str,
+    output: Path,
+    model_path: Path,
+    prosody: dict[str, Any] | None = None,
+) -> None:
+    global _silero_model
+    if not model_path.is_file():
+        raise BuildError(f"Не найдена модель Silero: {model_path}")
+    try:
+        import torch
+    except ImportError as exc:
+        raise BuildError(
+            "Для Silero не найден пакет torch. Запустите AudioManga в Python-"
+            "окружении с PyTorch или установите зависимости из requirements.txt."
+        ) from exc
+    if _silero_model is None:
+        torch.set_num_threads(4)
+        with warnings.catch_warnings():
+            # The packaged upstream model contains an old regex escape which is
+            # harmless on current Python but otherwise prints on every process.
+            warnings.simplefilter("ignore", SyntaxWarning)
+            _silero_model = torch.package.PackageImporter(str(model_path)).load_pickle(
+                "tts_models", "model"
+            )
+        _silero_model.to(torch.device("cpu"))
+    audio = _silero_model.apply_tts(
+        ssml_text=make_ssml(text, prosody),
+        speaker=voice,
+        sample_rate=48000,
+        put_accent=True,
+        put_yo=True,
+    )
+    # Tensor.tolist() works without NumPy and keeps the minimal runtime robust.
+    write_pcm16_wav(output, audio.detach().cpu(), 48000)
+
+
+def synthesize(
+    text: str,
+    voice: str,
+    output: Path,
+    model_path: Path,
+    prosody: dict[str, Any] | None = None,
+) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(".tmp.wav")
+    try:
+        synthesize_silero(text, voice, temporary, model_path, prosody)
+        temporary.replace(output)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def wav_info(path: Path) -> tuple[int, int, int, int]:
+    with wave.open(str(path), "rb") as audio:
+        return (
+            audio.getnchannels(),
+            audio.getsampwidth(),
+            audio.getframerate(),
+            audio.getnframes(),
+        )
+
+
+def append_silence(output: wave.Wave_write, milliseconds: int, sample_rate: int) -> None:
+    frames = max(0, round(sample_rate * milliseconds / 1000))
+    output.writeframes(b"\x00\x00" * frames)
+
+
+def combine_audio(
+    page_clips: list[list[Path]], output_path: Path, settings: dict[str, Any]
+) -> list[float]:
+    sample_rate = int(settings.get("sample_rate", 48000))
+    replica_pause = int(settings.get("pause_between_replicas_ms", 450))
+    page_lead = int(settings.get("page_lead_ms", 500))
+    page_tail = int(settings.get("page_tail_ms", 800))
+    page_durations: list[float] = []
+    with wave.open(str(output_path), "wb") as combined:
+        combined.setnchannels(1)
+        combined.setsampwidth(2)
+        combined.setframerate(sample_rate)
+        for clips in page_clips:
+            start_frames = combined.getnframes()
+            append_silence(combined, page_lead, sample_rate)
+            for index, clip in enumerate(clips):
+                channels, width, rate, _frames = wav_info(clip)
+                if (channels, width, rate) != (1, 2, sample_rate):
+                    raise BuildError(
+                        f"Несовместимый WAV {clip}: ожидается mono PCM16 {sample_rate} Hz"
+                    )
+                with wave.open(str(clip), "rb") as source:
+                    combined.writeframes(source.readframes(source.getnframes()))
+                if index + 1 < len(clips):
+                    append_silence(combined, replica_pause, sample_rate)
+            append_silence(combined, page_tail, sample_rate)
+            frames = combined.getnframes() - start_frames
+            page_durations.append(max(1.0, frames / sample_rate))
+    return page_durations
+
+
+def ffconcat_quote(path: Path) -> str:
+    return str(path.resolve()).replace("\\", "/").replace("'", "'\\''")
+
+
+def render_video(
+    ffmpeg: Path,
+    chapter: Path,
+    pages: list[dict[str, Any]],
+    durations: list[float],
+    audio: Path,
+    output: Path,
+    settings: dict[str, Any],
+    build_dir: Path,
+) -> None:
+    concat_path = build_dir / "pages.ffconcat"
+    lines = ["ffconcat version 1.0"]
+    for page, duration in zip(pages, durations):
+        image = chapter / page["image"]
+        lines.extend((f"file '{ffconcat_quote(image)}'", f"duration {duration:.6f}"))
+    lines.append(f"file '{ffconcat_quote(chapter / pages[-1]['image'])}'")
+    concat_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    resolution = str(settings.get("resolution", "1920x1080"))
+    try:
+        width, height = (int(value) for value in resolution.lower().split("x", 1))
+    except (ValueError, TypeError) as exc:
+        raise BuildError(f"Некорректное разрешение: {resolution}") from exc
+    fps = int(settings.get("fps", 30))
+    background = str(settings.get("background", "black"))
+    video_filter = (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color={background},"
+        "setsar=1,format=yuv420p"
+    )
+    command = [
+        str(ffmpeg), "-y", "-hide_banner", "-loglevel", "warning",
+        "-f", "concat", "-safe", "0", "-i", str(concat_path),
+        "-i", str(audio), "-vf", video_filter, "-r", str(fps),
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart",
+        str(output),
+    ]
+    log("Сборка видео через FFmpeg...")
+    result = subprocess.run(command, text=True)
+    if result.returncode:
+        raise BuildError(f"FFmpeg завершился с кодом {result.returncode}")
+
+
+def build(args: argparse.Namespace) -> Path:
+    chapter = Path(args.chapter).expanduser().resolve()
+    if not chapter.is_dir():
+        raise BuildError(f"Папка главы не найдена: {chapter}")
+    project, _project_path = load_or_create_project(chapter, args.refresh)
+    settings = project.setdefault("settings", {})
+    if args.voice:
+        settings["default_voice"] = args.voice
+    default_voice = str(settings.get("default_voice", "aidar"))
+    model_path = Path(args.model).expanduser().resolve()
+
+    warnings = project.get("warnings") or []
+    for warning in warnings:
+        log(f"Внимание: {warning}")
+    pages = project.get("pages") or []
+    if not pages:
+        raise BuildError("В сценарии нет страниц")
+
+    build_dir = chapter / BUILD_DIR
+    audio_dir = build_dir / "audio"
+    build_dir.mkdir(exist_ok=True)
+    audio_dir.mkdir(exist_ok=True)
+    page_clips: list[list[Path]] = []
+    total_regions = 0
+    for page in pages:
+        clips: list[Path] = []
+        for region in page.get("regions") or []:
+            if not region.get("speak", True):
+                continue
+            text = clean_translation(region.get("tts_text") or region.get("text"))
+            if not text:
+                continue
+            voice = str(region.get("voice") or default_voice)
+            prosody = region.get("prosody") or {}
+            ssml = make_ssml(text, prosody)
+            digest = hashlib.sha1(
+                f"silero-v5.4\0{voice}\0{ssml}".encode("utf-8")
+            ).hexdigest()[:12]
+            clip = audio_dir / f"{page['id']}_{region['id']}_{digest}.wav"
+            if not clip.exists():
+                log(f"Озвучка {page['id']}/{region['id']} ({voice}): {text}")
+                synthesize(text, voice, clip, model_path, prosody)
+            clips.append(clip)
+            total_regions += 1
+        page_clips.append(clips)
+    if not total_regions:
+        raise BuildError("В сценарии нет включённых реплик для озвучки")
+
+    combined_audio = build_dir / "chapter.wav"
+    durations = combine_audio(page_clips, combined_audio, settings)
+    ffmpeg = find_ffmpeg(args.ffmpeg)
+    output = Path(args.output).expanduser().resolve() if args.output else chapter / "chapter.mp4"
+    render_video(ffmpeg, chapter, pages, durations, combined_audio, output, settings, build_dir)
+    log(f"Готово: {output}")
+    return output
+
+
+def make_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="audiomanga.py",
+        description="Локальная озвучка переведённой главы манги",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    command = subparsers.add_parser("build", help="озвучить и собрать главу в MP4")
+    command.add_argument("chapter", help="папка с PNG и *.analysis.json")
+    command.add_argument("--voice", help="голос Silero, например aidar или xenia")
+    command.add_argument("--ffmpeg", help="путь к ffmpeg.exe")
+    command.add_argument(
+        "--model",
+        default=str(DEFAULT_SILERO_MODEL),
+        help="путь к собственной модели Silero v5.4",
+    )
+    command.add_argument("--output", help="выходной MP4; по умолчанию chapter.mp4")
+    command.add_argument(
+        "--refresh",
+        action="store_true",
+        help="пересоздать сценарий из analysis.json (ручные правки будут потеряны)",
+    )
+    command.set_defaults(handler=build)
+    return parser
+
+
+def main() -> int:
+    parser = make_parser()
+    args = parser.parse_args()
+    try:
+        args.handler(args)
+        return 0
+    except BuildError as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("Прервано пользователем", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    use_local_runtime()
+    raise SystemExit(main())
