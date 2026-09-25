@@ -11,6 +11,8 @@ import shutil
 import subprocess
 import sys
 import threading
+import urllib.error
+import urllib.request
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -201,6 +203,23 @@ class Handler(BaseHTTPRequestHandler):
                 self.state.save(data.get("project") or {})
                 self.state.start_build()
                 self.send_json({"ok": True}, HTTPStatus.ACCEPTED)
+            elif self.path == "/api/check-worker":
+                data = self.read_json()
+                worker_url = str(data.get("url") or "").strip().rstrip("/")
+                if not worker_url.startswith(("http://", "https://")):
+                    raise audiomanga.BuildError("Адрес Worker должен начинаться с http:// или https://")
+                request = urllib.request.Request(
+                    worker_url + "/health", headers={"Accept": "application/json"}
+                )
+                try:
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        result = json.loads(response.read().decode("utf-8"))
+                except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+                    raise audiomanga.BuildError(f"F5 Worker недоступен: {exc}") from exc
+                if not isinstance(result, dict) or result.get("status") != "ok":
+                    detail = result.get("error", "неизвестная ошибка") if isinstance(result, dict) else "некорректный ответ"
+                    raise audiomanga.BuildError(f"F5 Worker не готов: {detail}")
+                self.send_json({"ok": True, "worker": result})
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
         except (audiomanga.BuildError, OSError, ValueError) as exc:

@@ -12,6 +12,9 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
+import uuid
 import warnings
 import wave
 from array import array
@@ -179,6 +182,8 @@ def new_project(chapter: Path) -> dict[str, Any]:
             "resolution": "1920x1080",
             "fps": 30,
             "background": "black",
+            "f5_execution": "cpu",
+            "f5_worker_url": "http://127.0.0.1:8770",
         },
         "pages": pages,
         "warnings": warnings,
@@ -339,8 +344,16 @@ def resolve_reference_audio(chapter: Path, value: str) -> Path:
 
 
 def clean_f5_text(text: str) -> str:
-    """Remove Silero-only stress markers before sending text to F5-TTS."""
-    return text.replace("+", "")
+    """Remove Silero markers and avoid spelling all-caps text character by character."""
+    cleaned = text.replace("+", "")
+    letters = "".join(character for character in cleaned if character.isalpha())
+    if letters and letters.isupper():
+        cleaned = cleaned.lower()
+        for index, character in enumerate(cleaned):
+            if character.isalpha():
+                cleaned = cleaned[:index] + character.upper() + cleaned[index + 1 :]
+                break
+    return cleaned
 
 
 def synthesize_f5(
@@ -352,6 +365,7 @@ def synthesize_f5(
     nfe_step: int,
     f5_cli: Path,
     ffmpeg: Path,
+    device: str = "cpu",
     prosody: dict[str, Any] | None = None,
 ) -> None:
     if not f5_cli.is_file():
@@ -362,6 +376,8 @@ def synthesize_f5(
         raise BuildError(f"Скорость F5-TTS должна быть от 0.3 до 2.0, получено: {speed}")
     if not 4 <= nfe_step <= 64:
         raise BuildError(f"NFE steps F5-TTS должны быть от 4 до 64, получено: {nfe_step}")
+    if device not in {"cpu", "cuda"}:
+        raise BuildError(f"Неизвестное устройство F5-TTS: {device}")
 
     output.parent.mkdir(parents=True, exist_ok=True)
     raw_output = output.with_suffix(".f5.wav")
@@ -380,7 +396,7 @@ def synthesize_f5(
         "--output_file", raw_output.name,
         "--speed", str(speed),
         "--nfe_step", str(nfe_step),
-        "--device", "cpu",
+        "--device", device,
         "--remove_silence",
     ]
     environment = os.environ.copy()
@@ -416,6 +432,100 @@ def synthesize_f5(
     finally:
         raw_output.unlink(missing_ok=True)
         converted.unlink(missing_ok=True)
+
+
+def encode_multipart(fields: dict[str, str], file_field: str, file_path: Path) -> tuple[bytes, str]:
+    boundary = f"----AudioManga{uuid.uuid4().hex}"
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.extend(
+            [
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+                value.encode("utf-8"),
+                b"\r\n",
+            ]
+        )
+    safe_name = file_path.name.replace('"', "")
+    chunks.extend(
+        [
+            f"--{boundary}\r\n".encode(),
+            (
+                f'Content-Disposition: form-data; name="{file_field}"; '
+                f'filename="{safe_name}"\r\n'
+            ).encode("utf-8"),
+            b"Content-Type: application/octet-stream\r\n\r\n",
+            file_path.read_bytes(),
+            b"\r\n",
+            f"--{boundary}--\r\n".encode(),
+        ]
+    )
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
+def synthesize_f5_remote(
+    text: str,
+    output: Path,
+    reference_audio: Path,
+    reference_text: str,
+    speed: float,
+    nfe_step: int,
+    worker_url: str,
+    timeout: float = 600.0,
+    prosody: dict[str, Any] | None = None,
+) -> None:
+    if not reference_audio.is_file():
+        raise BuildError(f"Не найден референс голоса F5-TTS: {reference_audio}")
+    if not worker_url.strip():
+        raise BuildError("Не указан адрес удалённого F5 Worker")
+    body, content_type = encode_multipart(
+        {
+            "text": text,
+            "reference_text": reference_text,
+            "speed": str(speed),
+            "nfe_step": str(nfe_step),
+        },
+        "reference_audio",
+        reference_audio,
+    )
+    endpoint = worker_url.rstrip("/") + "/synthesize"
+    request = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={"Content-Type": content_type, "Accept": "audio/wav"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            audio = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1000]
+        raise BuildError(f"F5 Worker вернул HTTP {exc.code}: {detail}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise BuildError(f"F5 Worker недоступен по адресу {endpoint}: {exc}") from exc
+    if not audio.startswith(b"RIFF") or b"WAVE" not in audio[:16]:
+        raise BuildError("F5 Worker вернул данные, которые не похожи на WAV")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(".remote.wav")
+    try:
+        temporary.write_bytes(audio)
+        temporary.replace(output)
+        channels, width, rate, _frames = wav_info(output)
+        if (channels, width, rate) != (1, 2, 48000):
+            raise BuildError(
+                "F5 Worker вернул WAV в неподдерживаемом формате: "
+                f"channels={channels}, sample_width={width}, sample_rate={rate}"
+            )
+        add_wav_padding(
+            output,
+            max(0, int((prosody or {}).get("pause_before_ms", 0))),
+            max(0, int((prosody or {}).get("pause_after_ms", 0))),
+        )
+    except Exception:
+        output.unlink(missing_ok=True)
+        raise
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def add_wav_padding(path: Path, before_ms: int, after_ms: int) -> None:
@@ -543,6 +653,11 @@ def build(args: argparse.Namespace) -> Path:
     if args.voice:
         settings["default_voice"] = args.voice
     default_voice = str(settings.get("default_voice", "aidar"))
+    f5_execution = str(settings.get("f5_execution", "cpu"))
+    if f5_execution not in {"cpu", "cuda", "remote"}:
+        raise BuildError(f"Некорректный режим F5-TTS: {f5_execution}")
+    f5_worker_url = str(settings.get("f5_worker_url", "http://127.0.0.1:8770"))
+    f5_worker_timeout = float(settings.get("f5_worker_timeout_seconds", 600))
     model_path = Path(args.model).expanduser().resolve()
     f5_cli = Path(args.f5_cli).expanduser().resolve()
     ffmpeg = find_ffmpeg(args.ffmpeg)
@@ -579,6 +694,8 @@ def build(args: argparse.Namespace) -> Path:
                     chapter, str(f5.get("reference_audio") or "")
                 )
                 reference_text = clean_translation(f5.get("reference_text"))
+                if reference_text:
+                    reference_text = clean_f5_text(reference_text)
                 speed = float(f5.get("speed", 1.0))
                 nfe_step = int(f5.get("nfe_step", 32))
                 reference_signature = "missing"
@@ -588,7 +705,8 @@ def build(args: argparse.Namespace) -> Path:
                         f"{reference_audio}:{stat.st_size}:{stat.st_mtime_ns}"
                     )
                 cache_value = (
-                    f"f5-russian-hotstone228\0{synthesis_text}\0{reference_signature}\0{reference_text}\0"
+                    f"f5-russian-hotstone228\0{f5_execution}\0{f5_worker_url}\0"
+                    f"{synthesis_text}\0{reference_signature}\0{reference_text}\0"
                     f"{speed}\0{nfe_step}\0"
                     f"{int(prosody.get('pause_before_ms', 0))}\0"
                     f"{int(prosody.get('pause_after_ms', 0))}"
@@ -605,10 +723,16 @@ def build(args: argparse.Namespace) -> Path:
                     f"({engine}/{voice}): {synthesis_text}"
                 )
                 if engine == "f5":
-                    synthesize_f5(
-                        synthesis_text, clip, reference_audio, reference_text, speed,
-                        nfe_step, f5_cli, ffmpeg, prosody,
-                    )
+                    if f5_execution == "remote":
+                        synthesize_f5_remote(
+                            synthesis_text, clip, reference_audio, reference_text,
+                            speed, nfe_step, f5_worker_url, f5_worker_timeout, prosody,
+                        )
+                    else:
+                        synthesize_f5(
+                            synthesis_text, clip, reference_audio, reference_text, speed,
+                            nfe_step, f5_cli, ffmpeg, f5_execution, prosody,
+                        )
                 else:
                     synthesize(synthesis_text, voice, clip, model_path, prosody)
             clips.append(clip)

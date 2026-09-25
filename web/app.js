@@ -45,6 +45,71 @@ function select(values, value, onChange) {
   return node;
 }
 
+function nextRegionId() {
+  const ids = new Set();
+  let largestNumber = 0;
+  (state.data?.project?.pages || []).forEach((page) => {
+    (page.regions || []).forEach((region) => {
+      const id = String(region.id || "");
+      ids.add(id);
+      const match = /^r(\d+)$/i.exec(id);
+      if (match) largestNumber = Math.max(largestNumber, Number(match[1]));
+    });
+  });
+  let id;
+  do { id = `r${String(++largestNumber).padStart(3, "0")}`; } while (ids.has(id));
+  return id;
+}
+
+function addRegion(page) {
+  page.regions ||= [];
+  const previous = page.regions.at(-1);
+  const engine = previous?.engine || "silero";
+  page.regions.push({
+    id: nextRegionId(),
+    text: "",
+    tts_text: "",
+    speaker: "",
+    speak: true,
+    engine,
+    voice: previous?.voice || state.data?.voices?.[0] || "aidar",
+    prosody: { rate: "medium", pitch: "medium", pause_before_ms: 0, pause_after_ms: 0 },
+    f5: {
+      reference_audio: previous?.f5?.reference_audio || "",
+      reference_text: previous?.f5?.reference_text || "",
+      speed: previous?.f5?.speed ?? 1.0,
+      nfe_step: previous?.f5?.nfe_step ?? 32,
+    },
+  });
+  state.dirty = true;
+  render();
+  document.querySelector("#regions .region:last-child textarea")?.focus();
+}
+
+function removeRegion(page, index) {
+  const region = page.regions[index];
+  if (!region || !window.confirm(`Удалить реплику ${region.id}?`)) return;
+  page.regions.splice(index, 1);
+  state.dirty = true;
+  render();
+}
+
+function renderPageActions(page) {
+  let actions = $("#page-actions");
+  if (!actions) {
+    actions = document.createElement("div");
+    actions.id = "page-actions";
+    actions.className = "page-actions";
+    const add = document.createElement("button");
+    add.id = "add-region";
+    add.type = "button";
+    add.textContent = "+ Добавить реплику";
+    actions.append($("#region-count"), add);
+    document.querySelector(".page-heading").append(actions);
+  }
+  $("#add-region").onclick = () => addRegion(page);
+}
+
 function render() {
   const data = state.data;
   $("#chapter").value = data?.chapter || "";
@@ -53,7 +118,14 @@ function render() {
   document.querySelector("aside").hidden = !project;
   $("#page-editor").hidden = !project;
   $("#empty-state").hidden = !!project;
+  $("#f5-runtime").hidden = !project;
   if (!project) return;
+  project.settings ||= {};
+  project.settings.f5_execution ||= "cpu";
+  project.settings.f5_worker_url ||= "http://127.0.0.1:8770";
+  $("#f5-execution").value = project.settings.f5_execution;
+  $("#worker-url").value = project.settings.f5_worker_url;
+  $("#worker-url-field").hidden = project.settings.f5_execution !== "remote";
   const pages = project.pages || [];
   state.pageIndex = Math.min(state.pageIndex, Math.max(0, pages.length - 1));
   const nav = $("#pages"); nav.replaceChildren();
@@ -66,8 +138,10 @@ function render() {
   });
   if (!pages.length) return;
   const page = pages[state.pageIndex];
+  page.regions ||= [];
   $("#page-title").textContent = page.id;
   $("#region-count").textContent = `${page.regions.length} реплик`;
+  renderPageActions(page);
   $("#preview").src = `/api/page/${encodeURIComponent(page.image)}?v=${Date.now()}`;
   const regions = $("#regions"); regions.replaceChildren();
   page.regions.forEach((region, index) => regions.append(renderRegion(region, index)));
@@ -80,10 +154,15 @@ function renderRegion(region, index) {
   const card = document.createElement("article"); card.className = "region";
   const head = document.createElement("div"); head.className = "region-head";
   const id = document.createElement("span"); id.className = "region-id"; id.textContent = `${index + 1}. ${region.id}`;
+  const controls = document.createElement("div"); controls.className = "region-controls";
   const toggle = document.createElement("label"); toggle.className = "switch";
   const checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.checked = region.speak !== false;
   checkbox.onchange = () => { region.speak = checkbox.checked; state.dirty = true; };
-  toggle.append(checkbox, document.createTextNode("Озвучивать")); head.append(id, toggle); card.append(head);
+  toggle.append(checkbox, document.createTextNode("Озвучивать"));
+  const remove = document.createElement("button"); remove.type = "button"; remove.className = "danger compact"; remove.textContent = "Удалить";
+  const page = state.data.project.pages[state.pageIndex];
+  remove.onclick = () => removeRegion(page, index);
+  controls.append(toggle, remove); head.append(id, controls); card.append(head);
 
   const visible = document.createElement("textarea"); visible.value = region.text || "";
   visible.oninput = () => { region.text = visible.value; state.dirty = true; };
@@ -177,6 +256,27 @@ $("#browse").onclick = async () => {
 };
 $("#save").onclick = () => save().catch((error) => message(error.message, true));
 $("#build").onclick = () => build().catch((error) => message(error.message, true));
+$("#f5-execution").onchange = () => {
+  if (!state.data?.project) return;
+  state.data.project.settings.f5_execution = $("#f5-execution").value;
+  state.dirty = true;
+  render();
+};
+$("#worker-url").oninput = () => {
+  if (!state.data?.project) return;
+  state.data.project.settings.f5_worker_url = $("#worker-url").value;
+  state.dirty = true;
+};
+$("#check-worker").onclick = async () => {
+  try {
+    const result = await api("/api/check-worker", {
+      method: "POST",
+      body: JSON.stringify({ url: $("#worker-url").value }),
+    });
+    const worker = result.worker || {};
+    message(`F5 Worker доступен · устройство: ${worker.device || "неизвестно"}`);
+  } catch (error) { message(error.message, true); }
+};
 window.addEventListener("beforeunload", (event) => { if (state.dirty) { event.preventDefault(); event.returnValue = ""; } });
 
 api("/api/state").then((data) => { state.data = data; render(); renderBuild(); if (data.building) pollBuild(); }).catch((error) => message(error.message, true));

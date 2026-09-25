@@ -1,0 +1,31 @@
+services:
+  f5-worker-cpu:
+    profiles: ["cpu"]
+    build:
+      context: .
+      dockerfile: Dockerfile.f5-worker.cpu
+    environment:
+      F5_DEVICE: cpu
+    ports:
+      - "8770:8770"
+    volumes:
+      - f5-models:/models
+    restart: unless-stopped
+
+  f5-worker-nvidia:
+    profiles: ["nvidia"]
+    build:
+      context: .
+      dockerfile: Dockerfile.f5-worker.nvidia
+    environment:
+      F5_DEVICE: auto
+    ports:
+      - "8770:8770"
+    volumes:
+      - f5-models:/models
+    gpus: all
+    restart: unless-stopped
+
+volumes:
+  f5-models:
+

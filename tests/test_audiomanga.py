@@ -1,8 +1,10 @@
 import json
+import io
 import tempfile
 import unittest
 import wave
 from pathlib import Path
+from unittest.mock import patch
 
 import audiomanga
 
@@ -71,7 +73,42 @@ class AudioMangaTests(unittest.TestCase):
         self.assertGreater(prosody["pause_after_ms"], 0)
 
     def test_clean_f5_text_removes_silero_stress_markers(self):
-        self.assertEqual(audiomanga.clean_f5_text("Ч+УВСТВУЮ ёлку+"), "ЧУВСТВУЮ ёлку")
+        self.assertEqual(audiomanga.clean_f5_text("Ч+УВСТВУЮ ЭТО ЗДЕСЬ"), "Чувствую это здесь")
+        self.assertEqual(audiomanga.clean_f5_text("Это м+ой текст"), "Это мой текст")
+
+    def test_remote_f5_sends_multipart_and_saves_wav(self):
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(48000)
+            audio.writeframes(b"\x00\x00" * 48)
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return wav_buffer.getvalue()
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
+            root = Path(temporary)
+            reference = root / "voice.mp3"
+            reference.write_bytes(b"reference")
+            output = root / "result.wav"
+            with patch("audiomanga.urllib.request.urlopen", return_value=Response()) as call:
+                audiomanga.synthesize_f5_remote(
+                    "Привет", output, reference, "Пример", 1.0, 16,
+                    "http://worker:8770", prosody={},
+                )
+            request = call.call_args.args[0]
+            self.assertEqual(request.full_url, "http://worker:8770/synthesize")
+            self.assertIn(b'name="text"', request.data)
+            self.assertIn("multipart/form-data", request.headers["Content-type"])
+            self.assertEqual(audiomanga.wav_info(output), (1, 2, 48000, 48))
 
     def test_combine_audio_adds_page_timing(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
