@@ -63,7 +63,7 @@ def build_command(
     checkpoint: Path | str = CHECKPOINT,
     vocab: Path | str = VOCAB,
 ) -> list[str]:
-    return [
+    command = [
         _cli(),
         "--model", MODEL,
         "--ckpt_file", str(checkpoint),
@@ -76,8 +76,13 @@ def build_command(
         "--speed", str(speed),
         "--nfe_step", str(nfe_step),
         "--device", device,
-        "--remove_silence",
     ]
+    # F5's silence remover can erase very short utterances completely
+    # (for example, "Странно..."). AudioManga adds its own pauses later, so
+    # preserve the raw result for short lines.
+    if sum(character.isalpha() for character in text) >= 12:
+        command.append("--remove_silence")
+    return command
 
 
 app = FastAPI(title="AudioManga F5 Worker", version="1.0.0")

@@ -76,13 +76,27 @@ class AudioMangaTests(unittest.TestCase):
         self.assertEqual(audiomanga.clean_f5_text("Ч+УВСТВУЮ ЭТО ЗДЕСЬ"), "Чувствую это здесь")
         self.assertEqual(audiomanga.clean_f5_text("Это м+ой текст"), "Это мой текст")
 
+    def test_wav_has_speech_rejects_digital_silence(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
+            root = Path(temporary)
+            silent = root / "silent.wav"
+            voiced = root / "voiced.wav"
+            for path, frame in ((silent, b"\x03\x00"), (voiced, b"\x00\x10")):
+                with wave.open(str(path), "wb") as audio:
+                    audio.setnchannels(1)
+                    audio.setsampwidth(2)
+                    audio.setframerate(48000)
+                    audio.writeframes(frame * 100)
+            self.assertFalse(audiomanga.wav_has_speech(silent))
+            self.assertTrue(audiomanga.wav_has_speech(voiced))
+
     def test_remote_f5_sends_multipart_and_saves_wav(self):
         wav_buffer = io.BytesIO()
         with wave.open(wav_buffer, "wb") as audio:
             audio.setnchannels(1)
             audio.setsampwidth(2)
             audio.setframerate(48000)
-            audio.writeframes(b"\x00\x00" * 48)
+            audio.writeframes(b"\x00\x10" * 48)
 
         class Response:
             def __enter__(self):

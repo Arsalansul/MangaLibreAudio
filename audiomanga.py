@@ -356,6 +356,21 @@ def clean_f5_text(text: str) -> str:
     return cleaned
 
 
+def wav_has_speech(path: Path, minimum_peak: int = 100) -> bool:
+    """Return false for a valid WAV that contains only digital silence."""
+    try:
+        with wave.open(str(path), "rb") as audio:
+            if audio.getsampwidth() != 2:
+                return True
+            frames = audio.readframes(audio.getnframes())
+    except (OSError, EOFError, wave.Error):
+        return False
+    if not frames:
+        return False
+    samples = memoryview(frames).cast("h")
+    return any(abs(sample) >= minimum_peak for sample in samples)
+
+
 def synthesize_f5(
     text: str,
     output: Path,
@@ -397,8 +412,9 @@ def synthesize_f5(
         "--speed", str(speed),
         "--nfe_step", str(nfe_step),
         "--device", device,
-        "--remove_silence",
     ]
+    if sum(character.isalpha() for character in text) >= 12:
+        command.append("--remove_silence")
     environment = os.environ.copy()
     environment["PYTHONUTF8"] = "1"
     environment["PATH"] = str(ffmpeg.parent) + os.pathsep + environment.get("PATH", "")
@@ -424,6 +440,11 @@ def synthesize_f5(
         if conversion.returncode or not converted.is_file():
             raise BuildError("FFmpeg не смог привести звук F5-TTS к PCM16 48 kHz")
         converted.replace(output)
+        if not wav_has_speech(output):
+            raise BuildError(
+                "F5-TTS создал пустую озвучку. Попробуйте увеличить текст реплики "
+                "или число NFE steps."
+            )
         add_wav_padding(
             output,
             max(0, int((prosody or {}).get("pause_before_ms", 0))),
@@ -516,6 +537,8 @@ def synthesize_f5_remote(
                 "F5 Worker вернул WAV в неподдерживаемом формате: "
                 f"channels={channels}, sample_width={width}, sample_rate={rate}"
             )
+        if not wav_has_speech(output):
+            raise BuildError("F5 Worker вернул пустую озвучку")
         add_wav_padding(
             output,
             max(0, int((prosody or {}).get("pause_before_ms", 0))),
@@ -705,7 +728,7 @@ def build(args: argparse.Namespace) -> Path:
                         f"{reference_audio}:{stat.st_size}:{stat.st_mtime_ns}"
                     )
                 cache_value = (
-                    f"f5-russian-hotstone228\0{f5_execution}\0{f5_worker_url}\0"
+                    f"f5-russian-hotstone228-v2\0{f5_execution}\0{f5_worker_url}\0"
                     f"{synthesis_text}\0{reference_signature}\0{reference_text}\0"
                     f"{speed}\0{nfe_step}\0"
                     f"{int(prosody.get('pause_before_ms', 0))}\0"
@@ -717,6 +740,9 @@ def build(args: argparse.Namespace) -> Path:
                 raise BuildError(f"Неизвестный движок TTS: {engine}")
             digest = hashlib.sha1(cache_value.encode("utf-8")).hexdigest()[:12]
             clip = audio_dir / f"{page['id']}_{region['id']}_{digest}.wav"
+            if engine == "f5" and clip.exists() and not wav_has_speech(clip):
+                log(f"Внимание: {page['id']}/{region['id']}: удаляю пустой кэш F5-TTS")
+                clip.unlink()
             if not clip.exists():
                 log(
                     f"Озвучка {page['id']}/{region['id']} "

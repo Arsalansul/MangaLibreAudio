@@ -36,6 +36,22 @@ def test_command_accepts_resolved_local_model_files() -> None:
     assert command[command.index("--vocab_file") + 1] == "/models/vocab.txt"
 
 
+def test_short_phrase_is_not_erased_by_silence_remover() -> None:
+    with patch("worker.app._cli", return_value="f5-cli"):
+        command = build_command(
+            Path("ref.wav"), Path("out"), "Странно...", "Текст", 1.0, 16, "cpu"
+        )
+    assert "--remove_silence" not in command
+
+
+def test_long_phrase_still_removes_silence() -> None:
+    with patch("worker.app._cli", return_value="f5-cli"):
+        command = build_command(
+            Path("ref.wav"), Path("out"), "Это достаточно длинная реплика", "Текст", 1.0, 16, "cpu"
+        )
+    assert "--remove_silence" in command
+
+
 def test_empty_text_is_rejected() -> None:
     client = TestClient(app)
     response = client.post(
