@@ -59,6 +59,7 @@ def build_command(
     reference_text: str,
     speed: float,
     nfe_step: int,
+    cfg_strength: float,
     device: str,
     checkpoint: Path | str = CHECKPOINT,
     vocab: Path | str = VOCAB,
@@ -75,6 +76,7 @@ def build_command(
         "--output_file", "raw.wav",
         "--speed", str(speed),
         "--nfe_step", str(nfe_step),
+        "--cfg_strength", str(cfg_strength),
         "--device", device,
     ]
     # F5's silence remover can erase very short utterances completely
@@ -115,6 +117,7 @@ async def synthesize(
     reference_text: str = Form(""),
     speed: float = Form(1.0),
     nfe_step: int = Form(16),
+    cfg_strength: float = Form(2.0),
 ) -> FileResponse:
     text = text.strip()
     if not text:
@@ -123,6 +126,8 @@ async def synthesize(
         raise HTTPException(422, "speed должен быть от 0.3 до 2.0")
     if not 4 <= nfe_step <= 64:
         raise HTTPException(422, "nfe_step должен быть от 4 до 64")
+    if not 0.5 <= cfg_strength <= 4.0:
+        raise HTTPException(422, "cfg_strength должен быть от 0.5 до 4.0")
     try:
         device = select_device()
     except ValueError as exc:
@@ -149,7 +154,7 @@ async def synthesize(
         except Exception as exc:
             raise HTTPException(503, f"Не удалось загрузить модель с Hugging Face: {exc}") from exc
         command = build_command(
-            reference, temp_dir, text, reference_text.strip(), speed, nfe_step,
+            reference, temp_dir, text, reference_text.strip(), speed, nfe_step, cfg_strength,
             device, checkpoint, vocab,
         )
         environment = os.environ.copy()

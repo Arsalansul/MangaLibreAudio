@@ -21,15 +21,16 @@ def test_cuda_request_fails_when_unavailable() -> None:
 
 def test_command_uses_russian_model() -> None:
     with patch("worker.app._cli", return_value="f5-cli"):
-        command = build_command(Path("ref.wav"), Path("out"), "Привет", "Текст", 1.0, 16, "cpu")
+        command = build_command(Path("ref.wav"), Path("out"), "Привет", "Текст", 1.0, 16, 2.0, "cpu")
     assert "hotstone228/F5-TTS-Russian/model_last.safetensors" in " ".join(command)
     assert command[command.index("--device") + 1] == "cpu"
+    assert command[command.index("--cfg_strength") + 1] == "2.0"
 
 
 def test_command_accepts_resolved_local_model_files() -> None:
     with patch("worker.app._cli", return_value="f5-cli"):
         command = build_command(
-            Path("ref.wav"), Path("out"), "Привет", "Текст", 1.0, 16, "cuda",
+            Path("ref.wav"), Path("out"), "Привет", "Текст", 1.0, 16, 2.0, "cuda",
             Path("/models/model.safetensors"), Path("/models/vocab.txt"),
         )
     assert command[command.index("--ckpt_file") + 1] == "/models/model.safetensors"
@@ -39,7 +40,7 @@ def test_command_accepts_resolved_local_model_files() -> None:
 def test_short_phrase_is_not_erased_by_silence_remover() -> None:
     with patch("worker.app._cli", return_value="f5-cli"):
         command = build_command(
-            Path("ref.wav"), Path("out"), "Странно...", "Текст", 1.0, 16, "cpu"
+            Path("ref.wav"), Path("out"), "Странно...", "Текст", 1.0, 16, 2.0, "cpu"
         )
     assert "--remove_silence" not in command
 
@@ -47,7 +48,7 @@ def test_short_phrase_is_not_erased_by_silence_remover() -> None:
 def test_long_phrase_still_removes_silence() -> None:
     with patch("worker.app._cli", return_value="f5-cli"):
         command = build_command(
-            Path("ref.wav"), Path("out"), "Это достаточно длинная реплика", "Текст", 1.0, 16, "cpu"
+            Path("ref.wav"), Path("out"), "Это достаточно длинная реплика", "Текст", 1.0, 16, 2.0, "cpu"
         )
     assert "--remove_silence" in command
 

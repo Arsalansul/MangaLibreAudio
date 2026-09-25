@@ -80,6 +80,8 @@ function addRegion(page, afterIndex = null) {
       reference_text: previous?.f5?.reference_text || "",
       speed: previous?.f5?.speed ?? 1.0,
       nfe_step: previous?.f5?.nfe_step ?? 32,
+      cfg_strength: previous?.f5?.cfg_strength ?? 2.0,
+      volume_db: previous?.f5?.volume_db ?? 0.0,
     },
   };
   page.regions.splice(insertIndex, 0, region);
@@ -161,7 +163,9 @@ function render() {
 
 function renderRegion(region, index) {
   region.prosody ||= { rate: "medium", pitch: "medium", pause_before_ms: 0, pause_after_ms: 0 };
-  region.f5 ||= { reference_audio: "", reference_text: "", speed: 1.0, nfe_step: 32 };
+  region.f5 ||= { reference_audio: "", reference_text: "", speed: 1.0, nfe_step: 32, cfg_strength: 2.0, volume_db: 0.0 };
+  region.f5.cfg_strength ??= 2.0;
+  region.f5.volume_db ??= 0.0;
   region.engine ||= "silero";
   const card = document.createElement("article"); card.className = "region";
   const head = document.createElement("div"); head.className = "region-head";
@@ -212,11 +216,26 @@ function renderRegion(region, index) {
     referenceText.placeholder = "Можно оставить пустым для авторасшифровки";
     referenceText.oninput = () => { region.f5.reference_text = referenceText.value; state.dirty = true; };
     card.append(field("Текст референса · необязательно", referenceText));
+    const presets = document.createElement("div"); presets.className = "preset-row";
+    [["Быстро", 16], ["Обычно", 32], ["Качественно", 48]].forEach(([label, steps]) => {
+      const button = document.createElement("button"); button.type = "button"; button.className = "secondary compact";
+      button.textContent = label; button.classList.toggle("selected", Number(region.f5.nfe_step) === steps);
+      button.onclick = () => { region.f5.nfe_step = steps; state.dirty = true; render(); };
+      presets.append(button);
+    });
+    card.append(field("Качество генерации", presets));
     const f5Settings = document.createElement("div"); f5Settings.className = "grid";
     const speed = input(region.f5.speed ?? 1.0, (v) => region.f5.speed = v, "number"); speed.min = "0.3"; speed.max = "2"; speed.step = "0.05";
-    const nfe = input(region.f5.nfe_step ?? 32, (v) => region.f5.nfe_step = v, "number"); nfe.min = "4"; nfe.max = "64"; nfe.step = "2";
-    f5Settings.append(field("Скорость F5 · 0.3–2.0", speed), field("Качество NFE · 4–64", nfe));
+    const volume = input(region.f5.volume_db ?? 0.0, (v) => region.f5.volume_db = v, "number"); volume.min = "-24"; volume.max = "12"; volume.step = "0.5";
+    f5Settings.append(field("Скорость · 0.3–2.0", speed), field("Громкость · −24…+12 dB", volume));
     card.append(f5Settings);
+    const advanced = document.createElement("details"); advanced.className = "advanced";
+    const summary = document.createElement("summary"); summary.textContent = "Расширенные настройки F5";
+    const advancedGrid = document.createElement("div"); advancedGrid.className = "grid";
+    const nfe = input(region.f5.nfe_step ?? 32, (v) => region.f5.nfe_step = v, "number"); nfe.min = "4"; nfe.max = "64"; nfe.step = "2";
+    const cfg = input(region.f5.cfg_strength ?? 2.0, (v) => region.f5.cfg_strength = v, "number"); cfg.min = "0.5"; cfg.max = "4"; cfg.step = "0.1";
+    advancedGrid.append(field("NFE Steps · 4–64", nfe), field("CFG Strength · 0.5–4.0", cfg));
+    advanced.append(summary, advancedGrid); card.append(advanced);
   } else {
     card.append(field("Голос Silero", select(state.data.voices, region.voice || "aidar", (v) => region.voice = v)));
     const sileroProsody = document.createElement("div"); sileroProsody.className = "grid";

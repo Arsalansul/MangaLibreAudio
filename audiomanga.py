@@ -148,6 +148,8 @@ def discover_pages(chapter: Path) -> tuple[list[dict[str, Any]], list[str]]:
                         "reference_text": "",
                         "speed": 1.0,
                         "nfe_step": 32,
+                        "cfg_strength": 2.0,
+                        "volume_db": 0.0,
                     },
                     "kind": str(region.get("kind") or "text"),
                     "bbox": region.get("bbox") or [],
@@ -371,6 +373,30 @@ def wav_has_speech(path: Path, minimum_peak: int = 100) -> bool:
     return any(abs(sample) >= minimum_peak for sample in samples)
 
 
+def apply_wav_gain(path: Path, volume_db: float) -> None:
+    """Apply per-replica gain to a PCM16 WAV, clipping safely at 16-bit limits."""
+    if not -24.0 <= volume_db <= 12.0:
+        raise BuildError(f"Громкость F5 должна быть от -24 до +12 dB, получено: {volume_db}")
+    if abs(volume_db) < 0.001:
+        return
+    with wave.open(str(path), "rb") as source:
+        params = source.getparams()
+        if params.sampwidth != 2:
+            raise BuildError("Регулировка громкости поддерживает только PCM16 WAV")
+        samples = array("h")
+        samples.frombytes(source.readframes(source.getnframes()))
+    factor = 10 ** (volume_db / 20.0)
+    adjusted = array("h", (max(-32768, min(32767, round(value * factor))) for value in samples))
+    temporary = path.with_suffix(".gain.wav")
+    try:
+        with wave.open(str(temporary), "wb") as output:
+            output.setparams(params)
+            output.writeframes(adjusted.tobytes())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def synthesize_f5(
     text: str,
     output: Path,
@@ -378,6 +404,8 @@ def synthesize_f5(
     reference_text: str,
     speed: float,
     nfe_step: int,
+    cfg_strength: float,
+    volume_db: float,
     f5_cli: Path,
     ffmpeg: Path,
     device: str = "cpu",
@@ -391,6 +419,10 @@ def synthesize_f5(
         raise BuildError(f"Скорость F5-TTS должна быть от 0.3 до 2.0, получено: {speed}")
     if not 4 <= nfe_step <= 64:
         raise BuildError(f"NFE steps F5-TTS должны быть от 4 до 64, получено: {nfe_step}")
+    if not 0.5 <= cfg_strength <= 4.0:
+        raise BuildError(f"CFG Strength F5-TTS должен быть от 0.5 до 4.0, получено: {cfg_strength}")
+    if not -24.0 <= volume_db <= 12.0:
+        raise BuildError(f"Громкость F5 должна быть от -24 до +12 dB, получено: {volume_db}")
     if device not in {"cpu", "cuda"}:
         raise BuildError(f"Неизвестное устройство F5-TTS: {device}")
 
@@ -411,6 +443,7 @@ def synthesize_f5(
         "--output_file", raw_output.name,
         "--speed", str(speed),
         "--nfe_step", str(nfe_step),
+        "--cfg_strength", str(cfg_strength),
         "--device", device,
     ]
     if sum(character.isalpha() for character in text) >= 12:
@@ -445,6 +478,7 @@ def synthesize_f5(
                 "F5-TTS создал пустую озвучку. Попробуйте увеличить текст реплики "
                 "или число NFE steps."
             )
+        apply_wav_gain(output, volume_db)
         add_wav_padding(
             output,
             max(0, int((prosody or {}).get("pause_before_ms", 0))),
@@ -491,6 +525,8 @@ def synthesize_f5_remote(
     reference_text: str,
     speed: float,
     nfe_step: int,
+    cfg_strength: float,
+    volume_db: float,
     worker_url: str,
     timeout: float = 600.0,
     prosody: dict[str, Any] | None = None,
@@ -499,12 +535,21 @@ def synthesize_f5_remote(
         raise BuildError(f"Не найден референс голоса F5-TTS: {reference_audio}")
     if not worker_url.strip():
         raise BuildError("Не указан адрес удалённого F5 Worker")
+    if not 0.3 <= speed <= 2.0:
+        raise BuildError(f"Скорость F5-TTS должна быть от 0.3 до 2.0, получено: {speed}")
+    if not 4 <= nfe_step <= 64:
+        raise BuildError(f"NFE steps F5-TTS должны быть от 4 до 64, получено: {nfe_step}")
+    if not 0.5 <= cfg_strength <= 4.0:
+        raise BuildError(f"CFG Strength F5-TTS должен быть от 0.5 до 4.0, получено: {cfg_strength}")
+    if not -24.0 <= volume_db <= 12.0:
+        raise BuildError(f"Громкость F5 должна быть от -24 до +12 dB, получено: {volume_db}")
     body, content_type = encode_multipart(
         {
             "text": text,
             "reference_text": reference_text,
             "speed": str(speed),
             "nfe_step": str(nfe_step),
+            "cfg_strength": str(cfg_strength),
         },
         "reference_audio",
         reference_audio,
@@ -539,6 +584,7 @@ def synthesize_f5_remote(
             )
         if not wav_has_speech(output):
             raise BuildError("F5 Worker вернул пустую озвучку")
+        apply_wav_gain(output, volume_db)
         add_wav_padding(
             output,
             max(0, int((prosody or {}).get("pause_before_ms", 0))),
@@ -721,6 +767,8 @@ def build(args: argparse.Namespace) -> Path:
                     reference_text = clean_f5_text(reference_text)
                 speed = float(f5.get("speed", 1.0))
                 nfe_step = int(f5.get("nfe_step", 32))
+                cfg_strength = float(f5.get("cfg_strength", 2.0))
+                volume_db = float(f5.get("volume_db", 0.0))
                 reference_signature = "missing"
                 if reference_audio.is_file():
                     stat = reference_audio.stat()
@@ -730,7 +778,7 @@ def build(args: argparse.Namespace) -> Path:
                 cache_value = (
                     f"f5-russian-hotstone228-v2\0{f5_execution}\0{f5_worker_url}\0"
                     f"{synthesis_text}\0{reference_signature}\0{reference_text}\0"
-                    f"{speed}\0{nfe_step}\0"
+                    f"{speed}\0{nfe_step}\0{cfg_strength}\0{volume_db}\0"
                     f"{int(prosody.get('pause_before_ms', 0))}\0"
                     f"{int(prosody.get('pause_after_ms', 0))}"
                 )
@@ -752,12 +800,14 @@ def build(args: argparse.Namespace) -> Path:
                     if f5_execution == "remote":
                         synthesize_f5_remote(
                             synthesis_text, clip, reference_audio, reference_text,
-                            speed, nfe_step, f5_worker_url, f5_worker_timeout, prosody,
+                            speed, nfe_step, cfg_strength, volume_db,
+                            f5_worker_url, f5_worker_timeout, prosody,
                         )
                     else:
                         synthesize_f5(
                             synthesis_text, clip, reference_audio, reference_text, speed,
-                            nfe_step, f5_cli, ffmpeg, f5_execution, prosody,
+                            nfe_step, cfg_strength, volume_db,
+                            f5_cli, ffmpeg, f5_execution, prosody,
                         )
                 else:
                     synthesize(synthesis_text, voice, clip, model_path, prosody)

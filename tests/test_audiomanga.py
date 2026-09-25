@@ -3,6 +3,7 @@ import io
 import tempfile
 import unittest
 import wave
+from array import array
 from pathlib import Path
 from unittest.mock import patch
 
@@ -115,7 +116,7 @@ class AudioMangaTests(unittest.TestCase):
             output = root / "result.wav"
             with patch("audiomanga.urllib.request.urlopen", return_value=Response()) as call:
                 audiomanga.synthesize_f5_remote(
-                    "Привет", output, reference, "Пример", 1.0, 16,
+                    "Привет", output, reference, "Пример", 1.0, 16, 2.0, 0.0,
                     "http://worker:8770", prosody={},
                 )
             request = call.call_args.args[0]
@@ -123,6 +124,20 @@ class AudioMangaTests(unittest.TestCase):
             self.assertIn(b'name="text"', request.data)
             self.assertIn("multipart/form-data", request.headers["Content-type"])
             self.assertEqual(audiomanga.wav_info(output), (1, 2, 48000, 48))
+
+    def test_apply_wav_gain_changes_pcm_amplitude(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
+            output = Path(temporary) / "gain.wav"
+            with wave.open(str(output), "wb") as audio:
+                audio.setnchannels(1)
+                audio.setsampwidth(2)
+                audio.setframerate(48000)
+                audio.writeframes(b"\xe8\x03" * 10)  # 1000
+            audiomanga.apply_wav_gain(output, 6.0)
+            with wave.open(str(output), "rb") as audio:
+                samples = array("h")
+                samples.frombytes(audio.readframes(10))
+            self.assertAlmostEqual(samples[0], 1995, delta=2)
 
     def test_combine_audio_adds_page_timing(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
